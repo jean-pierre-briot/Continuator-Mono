@@ -267,14 +267,17 @@ class PrefixTreeContinuator:                # The main class and corresponding a
             self.last_note_end_time = time.time()
             while True:                                             # Infinite listening loop
                 for event in in_port.iter_pending():
+                    print('event: ' + str(event))
                     if event.type == 'note_on' and event.velocity > 0:
-                        self.continuation_sequence = []             # A new note has been played
-                        note = Note(event.note, None, event.velocity)
-                        if note.pitch in self.current_note_on_dict:
+                        if event.note in self.current_note_on_dict:
                             print('Warning: Note ' + str(note.pitch) + ' has been repeated before being ended')
-                        current_time = time.time()
-                        self.current_note_on_dict[note.pitch] = (note, current_time)
-                        self.played_notes.append(note)
+                            continue
+                        else:
+                            self.continuation_sequence = []             # A new note has been played
+                            note = Note(event.note, None, event.velocity)
+                            current_time = time.time()
+                            self.current_note_on_dict[note.pitch] = (note, current_time)
+                            self.played_notes.append(note)
                     elif ((event.type == 'note_off') or (event.type == 'note_on' and event.velocity == 0)) and (event.note in self.current_note_on_dict):
                         current_time = time.time()                  # A note has been ended
                         (note, note_start_time) = self.current_note_on_dict[event.note]
@@ -284,13 +287,14 @@ class PrefixTreeContinuator:                # The main class and corresponding a
                 silence_duration = time.time() - self.last_note_end_time    # When there is no more played notes pending events
                 if self.continuation_sequence:                      # If still continuation notes to be played,
                     self.play_midi_note(output_port, self.continuation_sequence.pop(0))     # then, play the first one (and remove it)
-                elif self.played_notes and not self.current_note_on_dict and self.current_note_on_dictsilence_duration > _silence_threshold:     # otherwise, if notes have been played, all notes on have been ended, and player has stopped playing
+                elif self.played_notes and not self.current_note_on_dict and silence_duration > _silence_threshold:     # otherwise, if notes have been played, all notes on have been ended, and player has stopped playing
                     self.train(self.played_notes)                   # then, train from played notes (if any)
                     self.continuation_sequence = self.generate(self.played_notes[-_max_played_notes_considered:])
                     if not self.continuation_sequence:
                         print("Generation failed.")
                     self.played_notes = []
-                # else:                                             otherwise, continue the main loop
+                else:                                               # otherwise, continue the main loop
+                    continue
 
     def batch_test(self, pitch_sequence_list):
         for pitch_sequence in pitch_sequence_list:
