@@ -21,24 +21,29 @@ import mido
 from mido import MidiFile, MidiTrack, Message, open_input, open_output, get_input_names, get_output_names
 
 #hyperparameters
-_silence_threshold = 2.0					# Silence duration after which continuator will start train and generate
+_silence_threshold = 2.0					# Silence duration after which Continuator will start train and generate
 _max_continuation_length = 20				# Maximum number of notes of a continuation
 _max_played_notes_considered = 20		    # Maximum last number of played notes considered for training
-_default_generated_note_duration = 0.5	    # Default duration for generated notes
-_default_generated_note_velocity = 64		# Default velocity for generated notes
+_default_generated_note_duration = 0.5	    # Default duration for generated notes (for batch test)
+_default_generated_note_velocity = 64		# Default velocity for generated notes (for batch test)
 _key_transposition_mode = False			    # Transposition into 12 keys/tonalities
 _octave_transposition_number = 0		    # Transposition into N octaves below and above (within the MIDI pitch note range)
 _first_continuation_default_random_generation_mode = True   # Random generation (among continuations) if first note generation fails
 _general_default_random_generation_mode = False             # Random generation (among continuations) if any note generation fails
 _match_pitch_interval_tolerance = 2         # Tolerance (semi-tones below and above) for matching pitch between node and note
+_generation_duration_mode = 'Learnt'        # 3 possible modes for the durations of the continuation notes:
+                                            # Learnt: duration of the corresponding matching note learnt,
+                                            # Played: duration of the notes played
+                                            # Fixed: fixed (_default_fixed_duration) duration
+_default_fixed_duration = 0.1
 
 class Note:                                 # Structure of a note
-    def __init__(self, pitch, duration, velocity):  # Instance variables: <pitch>, <duration, <velocity>
-        self.pitch = pitch                  # Pitch
-        self.duration = duration            # Duration
-        self.velocity = velocity            # Velocity
+    def __init__(self, pitch, duration, velocity):
+        self.pitch = pitch
+        self.duration = duration
+        self.velocity = velocity
 
-def create_note_sequence(pitch_sequence):
+def create_note_sequence(pitch_sequence):   # For Batch test
     note_sequence = []
     for pitch in pitch_sequence:
         note = Note(pitch, _default_generated_note_duration, _default_generated_note_velocity)
@@ -55,43 +60,42 @@ def current_note_on_tuple_pitch_list(current_note_on_tuple_list):
         note_pitch_list = []
         for note_tuple in current_note_on_tuple_list:
             note_pitch_list.append(note_tuple[0])
-        return(note_pitch_list)
+        return note_pitch_list
 
 class PrefixTreeNode:                       # Structure of a tree node to memorize and index learnt sequences
-    def __init__(self):                     # Instance variables: <note>, <children_list>, <continuation_index_list>
-        self.note = None                    # Corresponding note
-        self.children_list = None           # List of children nodes
-        self.continuation_index_list = None # List of indexes of continuations
-                                            # Default values = None, in order to know for instance when a node is a terminal leaf (no children/subtree)
-    def match(self, note, tolerance):                  # Check if current node characteristics (e.g., its corresponding note pitch) is matching some note characteristics (e.g., that note pitch)
+    def __init__(self):
+        self.note = None
+        self.children_list = None
+        self.continuation_index_list = None
+
+    def match(self, note, tolerance):       # Check if current node characteristics (e.g., its corresponding note pitch) is matching some note characteristics (e.g., that note pitch)
         return self.note.pitch in range(note.pitch - tolerance, note.pitch + tolerance + 1)
 
 class PrefixTreeContinuator:                # The main class and corresponding algorithms
     def __init__(self):
-        self.root_dictionary = {}           # Root tree dictionary
-        self.continuation_dictionary = {}   # Continuation dictionary
-        self.continuation_dictionary_current_index = 1  # Remembering the number of continuation index to be increased after each new continuation indexed
+        self.root_dictionary = {}
+        self.continuation_dictionary = {}
+        self.continuation_dictionary_current_index = 1
         self.current_note_on_dict = None    # Remembering current notes_on which are still on (not off yet)
                                             # key : pitch, value : tuple (note, note_start_time)
-        self.last_note_end_time = None      # Remembering last note end time
-        self.played_notes = []              # List of input (played) notes
+        self.last_note_end_time = None
+        self.played_notes = []
         self.continuation_sequence = []
 
-    def train(self, note_sequence):         # Main entry function lo train the continuator with a sequence of notes
+    def train(self, note_sequence):         # Main entry function lo train the Continuator with a sequence of notes
                                             # note_sequence = [(<pitch_1>, <duration_1>, <velocity_#), ... , (<pitch_N>, <duration_N>, <velocity_N>)]
         self.internal_train_without_key_transpose(note_sequence)    # Train with input sequence
-        if _key_transposition_mode:         # If key transposition,
-            for i in range(-5, 0):          # then, transpose pitches of all notes of the sequence in half-tone above and below upto half-octave
+        if _key_transposition_mode:
+            for i in range(-5, 0):
                 self.internal_train_without_key_transpose(self.transpose(note_sequence, i))
             for i in range(1, 7):
                 self.internal_train_without_key_transpose(self.transpose(note_sequence, i))
 
     def internal_train_without_key_transpose(self, note_sequence):
-                                            # Internal train function
-        self.internal_train_without_any_transpose(note_sequence)    # Train with input sequence
-        if _octave_transposition_number > 0:  # If octave transposition,
+        self.internal_train_without_any_transpose(note_sequence)
+        if _octave_transposition_number > 0:
             note_pitch_sequence = []
-            for note in note_sequence:      # then, transpose pitches of all notes of the sequence in octaves within MIDI pitches limits [O, 128]
+            for note in note_sequence:
                 note_pitch_sequence.append(note.pitch)
             max_pitch = max(note_pitch_sequence)
             i = 1
@@ -105,7 +109,7 @@ class PrefixTreeContinuator:                # The main class and corresponding a
                 i += -1
  
     @staticmethod
-    def transpose(note_sequence, t):        # Transpose pitches of all notes of the sequence in some offset
+    def transpose(note_sequence, t):
         transposed_note_sequence = []
         for note in note_sequence:
             new_note = Note(note.pitch + t, note.duration, note.velocity)
@@ -113,12 +117,11 @@ class PrefixTreeContinuator:                # The main class and corresponding a
         return transposed_note_sequence
 
     def internal_train_without_any_transpose(self, note_sequence):  # Main internal train function
-        if not self.root_dictionary and len(note_sequence) <= 1:         # If memory empty and played sequence contains only one note or none,
-            raise RuntimeError('Only one note initially played, thus no continuation may be learnt and therefore generated')   # then, no continuation can be learnt anf therefore (cannot be) generated
-        i = len(note_sequence) - 1   # index of the last item of the played note sequence
-        while i > 0:                                                # Iterative matching of the successive notes (events) of the played sequence
+        if not self.root_dictionary and len(note_sequence) <= 1:
+            raise RuntimeError('Only one note initially played, thus no continuation may be learnt and therefore generated')
+        i = len(note_sequence) - 1                                  # index of the last item of the played note sequence
+        while i > 0:
                                                                     # i will vary from length-1 (note_N-1) to 0 (note_1)
-         # for k in range(len(note_sequence) - 1, -1 - 1):          Does not work correctly (?), thus substituted by a while loop
             note_sub_sequence = note_sequence[:i]                   # Prefix Sub-sequence: [note_1, .. , note_i]
             continuation = note_sequence[i]                         # Continuation = event_i
             self.continuation_dictionary[self.continuation_dictionary_current_index] = continuation
@@ -129,19 +132,19 @@ class PrefixTreeContinuator:                # The main class and corresponding a
                 self.root_dictionary[root_note.pitch] = current_node
                 current_node.note = root_note
                 current_node.continuation_index_list = [self.continuation_dictionary_current_index]
-            else:                                                   # Otherwise, recursive traversal of the tree branches
+            else:                                                   # otherwise, recursive traversal of the tree branches
                 current_node = self.root_dictionary[root_note.pitch]
                 current_node.continuation_index_list.append(self.continuation_dictionary_current_index) # At first, add the continuation to the continuation list of the root
             for note in reversed_note_sub_sequence[1:]:             # Iterative traversal for matching ith level node of the reverse input sequence
                                                                     # with a note of the corresponding ith tree branch level children
-                if current_node.children_list is None:              # If there is no children, we have met a terminating leaf,
+                if current_node.children_list is None:              # If there is no children, then, we have met a terminating leaf,
                     new_child_node = PrefixTreeNode()               # then, we create and insert a new node
                     new_child_node.note = note
                     new_child_node.continuation_index_list = [self.continuation_dictionary_current_index]
                     current_node.children_list = [new_child_node]
-                    current_node = new_child_node                   # And continue the iterated traversal
-                else:                                               # Otherwise
-                    node_exists = False                             # Setting up the initial value of a flag to know if we have found a matching node
+                    current_node = new_child_node                   # and continue the iterated traversal
+                else:                                               # otherwise,
+                    node_exists = False                             # we set up the initial value of a flag to know if we have found a matching node
                     for child_node in current_node.children_list:   # while iterating over the children
                         if child_node.match(note, 0):               # This child (exactly) matches
                             child_node.continuation_index_list.append(self.continuation_dictionary_current_index)
@@ -157,13 +160,13 @@ class PrefixTreeContinuator:                # The main class and corresponding a
             self.continuation_dictionary_current_index += 1
             i += -1                                                 # Continue the matching search iteration one level down
 
-    def display_memory(self):                                       # To display the list of the trees within the memory
+    def display_memory(self):
          print('Memory:')
          for dummy, root in self.root_dictionary.items():
-              self.display_tree(root, 0)                        # Calling a recursive display of the tree
+              self.display_tree(root, 0)
 
-    def display_tree(self, node, level):                            # Recursive display of a tree nodes (corresponding notes and continuations)
-        indent = '  ' * level                                       # Showing number of indentations corresponding to the level of the node
+    def display_tree(self, node, level):
+        indent = '  ' * level
         print(indent, end='')
         continuation_pitch_list = []
         for i in range(len(node.continuation_index_list)):
@@ -174,21 +177,28 @@ class PrefixTreeContinuator:                # The main class and corresponding a
                 self.display_tree(child, level + 1)
 
     def generate(self, note_sequence):                              # Generation of a continuation
-        length_note_sequence = len(note_sequence)                   # Remember length of the sequence of notes, because will be used iteratively
+        length_note_sequence = len(note_sequence)                   # Remember length of the played input sequence of notes, because note_sequence will be expanded (append)
         last_input_note = note_sequence[-1]                         # We start with the last note of the reverse sequence: Note_N
         self.continuation_sequence = []                             # Initialization: Assign continuation list to empty list
         matching_child = None                                       # Declaring that flag
         for i in range(1, _max_continuation_length):
-            if last_input_note.pitch not in self.root_dictionary:   # If there is no matching tree root thus we cannot generate a continuation
-                                                                    # if default random generation mode
-                if _general_default_random_generation_mode:
+            ii = i
+            if last_input_note.pitch not in self.root_dictionary:   # If there is no matching tree root thus we cannot generate a continuatioI
+                if _general_default_random_generation_mode:         # If default random generation mode
                     next_note = self.continuation_dictionary[random.randint(1, len(self.continuation_dictionary))]
                     note_sequence.append(next_note)                 # Add this continuation note to the list of input notes
                     self.continuation_sequence.append(next_note)    # Add this continuation note to the list of continuations
                     last_input_note = next_note                     # And continue the generation from this (new) last note
                 elif i == 1 and _first_continuation_default_random_generation_mode:
-                    # print('generate: self.continuation_dictionary: ' + str(self.continuation_dictionary))
                     next_note = self.continuation_dictionary[random.randint(1, len(self.continuation_dictionary))]
+                    match _generation_duration_mode:
+                        # case 'Learnt':                            If Learnt duration, do nothing specific
+                        case 'Played':
+                            if ii > len(note_sequence):
+                                ii = i - len(note_sequence)
+                            next_note.duration = note_sequence[ii - 1].duration
+                        case 'Fixed':
+                            next_note.duration = _default_fixed_duration
                     note_sequence.append(next_note)                 # Add this continuation note to the list of input notes
                     self.continuation_sequence.append(next_note)    # Add this continuation note to the list of continuations
                     last_input_note = next_note                     # And continue the generation from this (new) last note
@@ -220,17 +230,24 @@ class PrefixTreeContinuator:                # The main class and corresponding a
                 if current_node.children_list is None or j >= length_note_sequence or matching_child is None:
                                                                     # If the search is finished
                                                                     # because:
-                                                                    # a) we reached a leaf
-                                                                    # or b) we reached the end of the reverse sequence
-                                                                    # or c) current matching has failed
-                                                                    # the, we create a new continuation note
+                                                                    # a) we reached a leaf,
+                                                                    # or b) we reached the end of the reverse sequence,
+                                                                    # or c) current matching has failed,
+                                                                    # then, we create a new continuation note
                     current_node_continuation_index_list = current_node.continuation_index_list
-                    # print('generate: current_node.note.pitch: ' + str(current_node.note.pitch) + ' current_node_continuation_index_list: ' + str(current_node_continuation_index_list))
                     next_note = self.continuation_dictionary[current_node_continuation_index_list[random.randint(0, len(current_node_continuation_index_list) -1)]]
                                                                     # by sorting within current node list of continuations
                                                                     # as there may have several occurrences of the same note,
                                                                     # this implements the probabilities of a Markov model
-                    note_sequence.append(next_note) # Add this continuation note to the list of input notes
+                    match _generation_duration_mode:
+                        # case 'Learnt':                            If Learnt duration, do nothing specific
+                        case 'Played':
+                            if ii > len(note_sequence):
+                                ii = i - len(note_sequence)
+                            next_note.duration = note_sequence[ii - 1].duration
+                        case 'Fixed':
+                            next_note.duration = _default_fixed_duration
+                    note_sequence.append(next_note)                 # Add this continuation note to the list of input notes
                     self.continuation_sequence.append(next_note)    # Add this continuation note to the list of continuations
                     last_input_note = next_note                     # And continue the generation from this (new) last note
         return self.continuation_sequence
@@ -239,7 +256,6 @@ class PrefixTreeContinuator:                # The main class and corresponding a
     def play_midi_note(port_name, note):
         with open_output(port_name) as output:
             output.send(mido.Message('note_on', note = note.pitch, velocity = note.velocity))
-            # print('play_midi_note_sequence: note.duration: ' + str(note.duration))
             time.sleep(note.duration)
             output.send(mido.Message('note_off', note = note.pitch, velocity = note.velocity))
 
@@ -252,45 +268,32 @@ class PrefixTreeContinuator:                # The main class and corresponding a
             while True:                                             # Infinite listening loop
                 for event in in_port.iter_pending():
                     if event.type == 'note_on' and event.velocity > 0:
-                        self.continuation_sequence = []
+                        self.continuation_sequence = []             # A new note has been played
                         note = Note(event.note, None, event.velocity)
                         if note.pitch in self.current_note_on_dict:
                             print('Warning: Note ' + str(note.pitch) + ' has been repeated before being ended')
-                        # print('note_on event: ' + str(event) + ' time.time: ' + str(time.time()) + ' self.last_note_end_time: ' + str(self.last_note_end_time))
                         current_time = time.time()
                         self.current_note_on_dict[note.pitch] = (note, current_time)
-                        # self.last_note_end_time = current_time				Seems unnecessary and uncorrect
-                        # print('new note: ' + str(note) + ' note.pitch: ' + str(note.pitch) + ' note.duration: ' + str(note.duration))
                         self.played_notes.append(note)
                     elif ((event.type == 'note_off') or (event.type == 'note_on' and event.velocity == 0)) and (event.note in self.current_note_on_dict):
-                        current_time = time.time()
+                        current_time = time.time()                  # A note has been ended
                         (note, note_start_time) = self.current_note_on_dict[event.note]
                         del self.current_note_on_dict[event.note]
                         note.duration = current_time - note_start_time
                         self.last_note_end_time = current_time
-                        # print('note_off event: ' + str(event) + ' time.time: ' + str(time.time()) + ' self.last_note_end_time: ' + str(self.last_note_end_time) + ' self.current_note_on.duration: ' + str(self.current_note_on.duration))
-                #   elif ((event.type == 'note_off') or (event.type == 'note_on' and event.velocity == 0)):
-                #       None
-                        # print('event.note: ' + str(event.note) + ' self.current_note_on_dict: ' + str(self.self.current_note_on_dict))
-                # print('listen_and_continue: time.time(): ' + str(time.time()) + ' self.last_note_end_time: ' + str(self.last_note_end_time) + ' _silence_threshold: ' + str(_silence_threshold))
-                silence_duration = time.time() - self.last_note_end_time
-                # print('listen_and_continue: silence_duration: ' + str(silence_duration))
-                if self.continuation_sequence:
-                    self.play_midi_note(output_port, self.continuation_sequence.pop(0))
-                elif self.played_notes and silence_duration > _silence_threshold and not self.current_note_on_dict:
-                    # print('self.played_notes and silence_duration > _silence_threshold: pitch_sequence_from_note_sequence(played_notes):' + str(pitch_sequence_from_note_sequence(self.played_notes)))
-                    # print('self.played_notes: ' + str(pitch_sequence_from_note_sequence(self.played_notes)))
-                    self.train(self.played_notes)
-                    # self.display_memory()
+                silence_duration = time.time() - self.last_note_end_time    # When there is no more played notes pending events
+                if self.continuation_sequence:                      # If still continuation notes to be played,
+                    self.play_midi_note(output_port, self.continuation_sequence.pop(0))     # then, play the first one (and remove it)
+                elif self.played_notes and not self.current_note_on_dict and self.current_note_on_dictsilence_duration > _silence_threshold:     # otherwise, if notes have been played, all notes on have been ended, and player has stopped playing
+                    self.train(self.played_notes)                   # then, train from played notes (if any)
                     self.continuation_sequence = self.generate(self.played_notes[-_max_played_notes_considered:])
                     if not self.continuation_sequence:
                         print("Generation failed.")
                     self.played_notes = []
-                # time.sleep(_after_continuation_sleep)
+                # else:                                             otherwise, continue the main loop
 
     def batch_test(self, pitch_sequence_list):
         for pitch_sequence in pitch_sequence_list:
-            # print('Training with sequence: ' + str(pitch_sequence))
             note_sequence = create_note_sequence(pitch_sequence)
             self.train(note_sequence)
             self.display_memory()
@@ -312,9 +315,6 @@ class PrefixTreeContinuator:                # The main class and corresponding a
                     self.current_note_on_dict[note.pitch] = (note, current_time)
                 if ((event.type == "note_off") or (event.type == "note_on" and event.velocity == 0)) and (event.note in self.current_note_on_dict):
                     (note, note_start_time) = self.current_note_on_dict[event.note]
-                    # if pending_notes[msg.note] == None:
-                        # print("Found 0 velocity note, skipping it")
-                    #    continue
                     del self.current_note_on_dict[event.note]
                     note.duration = current_time - note_start_time
         return note_sequence
@@ -324,15 +324,11 @@ class PrefixTreeContinuator:                # The main class and corresponding a
             midi_file = mido.MidiFile()
             track = MidiTrack()
             midi_file.tracks.append(track)
-            time = 0
+            current_time = 0
             for note in note_sequence:
-                # print('note_on time: ' + str(time))
-                track.append(Message('note_on', time=time, note=note.pitch, velocity=note.velocity))
-                # print('note.duration: ' + str(note.duration))
-                # print('play_midi_note_sequence: note.duration: ' + str(note.duration))
-                time += note.duration
-                track.append(Message('note_off', time=time, note=note.pitch, velocity=note.velocity))
-                # print('note_off time: ' + str(time))
+                track.append(Message('note_on', time=current_time, note=note.pitch, velocity=note.velocity))
+                current_time += note.duration
+                track.append(Message('note_off', time=current_time, note=note.pitch, velocity=note.velocity))
             midi_file.save(midi_file_name)
 
     def run(self, mode):
@@ -345,9 +341,7 @@ class PrefixTreeContinuator:                # The main class and corresponding a
             case 'File':
                 note_sequence = self.read_midi_file('Test.mid')
                 self.train(note_sequence)
-                # self.display_memory()
                 self.continuation_sequence = self.generate(note_sequence[-_max_played_notes_considered:])
-                # print('self.continuation_sequence: ' + str(self.continuation_sequence))
                 self.write_midi_file('Continuation.mid', self.continuation_sequence)
             case 'Batch':    # Batch test
                 self.batch_test([[48, 50, 52, 53], [48, 50, 50, 52], [48, 50], [50, 48], [48]])
