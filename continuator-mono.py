@@ -267,7 +267,6 @@ class PrefixTreeContinuator:                # The main class and corresponding a
             self.last_note_end_time = time.time()
             while True:                                             # Infinite listening loop
                 for event in in_port.iter_pending():
-                    print('event: ' + str(event))
                     if event.type == 'note_on' and event.velocity > 0:
                         if event.note in self.current_note_on_dict:
                             print('Warning: Note ' + str(note.pitch) + ' has been repeated before being ended')
